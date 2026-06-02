@@ -9,5 +9,5 @@ env/
 .env
 
 # Downloaded piece assets
-pieces_alpha/
+pieces_*/
 pieces/

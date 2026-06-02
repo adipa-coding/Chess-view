@@ -1,404 +1,1255 @@
+"""
+Premium Chess PGN Viewer
+========================
+A fully overhauled, Lichess-inspired chess PGN viewer built with CustomTkinter.
+
+Architecture highlights:
+  - Single unified tkinter.Canvas for the board (no Label grid)
+  - Cubic ease-out animation engine (f(t) = 1 - (1-t)^3)
+  - Dynamic move duration (120ms – 200ms based on distance)
+  - Simultaneous castling animations (king + rook together)
+  - Debounced navigation (interrupt + graceful skip)
+  - Multi-pack piece asset system with auto-download
+  - Lichess-accurate board themes with last-move highlights
+  - Square-click interaction with highlight ring
+  - LANCZOS-filtered piece rescaling on resize
+"""
+
 import customtkinter as ctk
+import tkinter as tk
+from tkinter import filedialog, messagebox
 import chess
 import chess.pgn
 import os
-import urllib.request
 import io
 import time
 import math
-from PIL import Image
+import threading
+import urllib.request
+from PIL import Image, ImageTk, ImageDraw, ImageFilter
 
-# Piece URL mapping (Alpha style)
-PIECE_URLS = {
-    'P': 'wP.png', 'N': 'wN.png', 'B': 'wB.png', 'R': 'wR.png', 'Q': 'wQ.png', 'K': 'wK.png',
-    'p': 'bP.png', 'n': 'bN.png', 'b': 'bB.png', 'r': 'bR.png', 'q': 'bQ.png', 'k': 'bK.png'
+# ──────────────────────────────────────────────
+#  PIECE PACK DEFINITIONS
+#  Each pack maps a piece symbol → filename.
+#  All packs are fetched from public GitHub repos.
+# ──────────────────────────────────────────────
+PIECE_PACKS = {
+    "Alpha": {
+        "base_url": "https://raw.githubusercontent.com/oakmac/chessboardjs/master/website/img/chesspieces/alpha/",
+        "files": {
+            "P": "wP.png", "N": "wN.png", "B": "wB.png",
+            "R": "wR.png", "Q": "wQ.png", "K": "wK.png",
+            "p": "bP.png", "n": "bN.png", "b": "bB.png",
+            "r": "bR.png", "q": "bQ.png", "k": "bK.png",
+        },
+        "folder": "pieces_alpha",
+    },
+    "Cburnett": {
+        # Lichess default SVG-rasterised set (PNG mirrors on GitHub)
+        "base_url": "https://raw.githubusercontent.com/lichess-org/lila/master/public/piece/cburnett/",
+        "files": {
+            "P": "wP.png", "N": "wN.png", "B": "wB.png",
+            "R": "wR.png", "Q": "wQ.png", "K": "wK.png",
+            "p": "bP.png", "n": "bN.png", "b": "bB.png",
+            "r": "bR.png", "q": "bQ.png", "k": "bK.png",
+        },
+        "folder": "pieces_cburnett",
+    },
+    "Maestro": {
+        "base_url": "https://raw.githubusercontent.com/lichess-org/lila/master/public/piece/maestro/",
+        "files": {
+            "P": "wP.png", "N": "wN.png", "B": "wB.png",
+            "R": "wR.png", "Q": "wQ.png", "K": "wK.png",
+            "p": "bP.png", "n": "bN.png", "b": "bB.png",
+            "r": "bR.png", "q": "bQ.png", "k": "bK.png",
+        },
+        "folder": "pieces_maestro",
+    },
+    "California": {
+        "base_url": "https://raw.githubusercontent.com/lichess-org/lila/master/public/piece/california/",
+        "files": {
+            "P": "wP.png", "N": "wN.png", "B": "wB.png",
+            "R": "wR.png", "Q": "wQ.png", "K": "wK.png",
+            "p": "bP.png", "n": "bN.png", "b": "bB.png",
+            "r": "bR.png", "q": "bQ.png", "k": "bK.png",
+        },
+        "folder": "pieces_california",
+    },
 }
-BASE_URL = "https://raw.githubusercontent.com/oakmac/chessboardjs/master/website/img/chesspieces/alpha/"
 
-# Themes (slightly refined for aesthetics)
+# ──────────────────────────────────────────────
+#  BOARD THEMES
+#  last_move colours use (R,G,B,A) tuples for
+#  direct PIL compositing.
+# ──────────────────────────────────────────────
 THEMES = {
-    "Classic Wood": {"light": "#EEDEA4", "dark": "#C89554"},
-    "Ocean Blue": {"light": "#D1E4F6", "dark": "#4B7399"},
-    "Lichess Green": {"light": "#F0D9B5", "dark": "#B58863"},
-    "Dark Mode": {"light": "#787878", "dark": "#4B4B4B"}
+    "Lichess Wood": {
+        "light":     "#f0d9b5",
+        "dark":      "#b58863",
+        "last_move": (155, 199,   0, 105),   # golden-green overlay
+        "selected":  (20,  85,  30, 128),    # deep green ring
+        "coords":    "#b58863",              # coordinate label color
+    },
+    "Ocean Blue": {
+        "light":     "#dee3e6",
+        "dark":      "#8ca2ad",
+        "last_move": (115, 203, 235, 128),
+        "selected":  ( 30,  80, 190, 128),
+        "coords":    "#8ca2ad",
+    },
+    "Tournament Green": {
+        "light":     "#ffffdd",
+        "dark":      "#86a666",
+        "last_move": (247, 247, 121, 160),
+        "selected":  ( 20, 140,  20, 128),
+        "coords":    "#86a666",
+    },
+    "Dark Marble": {
+        "light":     "#787878",
+        "dark":      "#4b4b4b",
+        "last_move": (200, 200,  80, 120),
+        "selected":  (180,  60,  60, 128),
+        "coords":    "#888888",
+    },
+    "Rose Gold": {
+        "light":     "#f2d0c4",
+        "dark":      "#c0806a",
+        "last_move": (220, 120,  60, 110),
+        "selected":  (180,  40, 100, 128),
+        "coords":    "#c0806a",
+    },
+    "Midnight": {
+        "light":     "#3d4a6b",
+        "dark":      "#1e2640",
+        "last_move": ( 80, 180, 240, 110),
+        "selected":  (100, 220, 255, 128),
+        "coords":    "#5a6a90",
+    },
 }
 
+# ──────────────────────────────────────────────
+#  ANIMATION CONSTANTS
+# ──────────────────────────────────────────────
+ANIM_MIN_MS   = 120    # milliseconds for 1-square move
+ANIM_MAX_MS   = 200    # milliseconds for longest diagonal
+ANIM_TICK_MS  = 8      # ~120 fps inner loop tick
+COORD_FONT    = ("Segoe UI", 10, "bold")  # coordinate labels on canvas
+
+# ──────────────────────────────────────────────
+#  HELPER: hex colour → (R,G,B) tuple
+# ──────────────────────────────────────────────
+def hex_to_rgb(h: str) -> tuple:
+    h = h.lstrip("#")
+    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  CHESS BOARD CANVAS WIDGET
+#  All board drawing and animation live here.
+# ═══════════════════════════════════════════════════════════════════
+class ChessBoardCanvas(tk.Canvas):
+    """
+    A single Canvas that renders the entire chess board:
+      - Coloured squares drawn as filled rectangles
+      - Rank/file coordinate labels drawn as canvas text items
+      - Piece images rendered as canvas image items
+      - Highlight overlays (last-move, selected-square) composited via PIL
+
+    Animation is driven by self.after() scheduling with cubic ease-out
+    interpolation.  Multiple simultaneous animations (castling) are
+    supported by keeping a list of active animation descriptors.
+    """
+
+    def __init__(self, master, size: int, theme_name: str, **kwargs):
+        super().__init__(
+            master,
+            width=size,
+            height=size,
+            bg="#1a1a2e",          # dark surround
+            highlightthickness=0,
+            bd=0,
+            **kwargs,
+        )
+        # ── State ────────────────────────────────────────
+        self.board_size   = size          # total canvas pixels
+        self.sq_size      = size // 8     # pixels per square (will update on resize)
+        self.theme_name   = theme_name
+        self.theme        = THEMES[theme_name]
+        self.flipped      = False         # board orientation
+
+        # Chess board state (injected from parent app)
+        self.chess_board: chess.Board | None = None
+
+        # PIL images per piece symbol (resized to sq_size)
+        self.piece_pil: dict[str, Image.Image] = {}   # original PIL images (pack resolution)
+        self.piece_tk:  dict[str, ImageTk.PhotoImage] = {}  # tk-ready at current sq_size
+
+        # Canvas item IDs for pieces: square_index → canvas item id
+        self.piece_items: dict[int, int] = {}
+
+        # Canvas item IDs for highlight overlays
+        self._last_move_items: list[int] = []   # rectangles / overlays
+        self._selected_item: int | None  = None  # selected-square ring
+
+        # ── Animation state ─────────────────────────────
+        # Each entry: {"item": canvas_id, "sx": float, "sy": float,
+        #              "ex": float, "ey": float, "t": float,
+        #              "duration_ms": float, "start_ms": float,
+        #              "on_done": callable | None}
+        self._animations: list[dict] = []
+        self._anim_job: str | None   = None
+
+        # ── Interaction ──────────────────────────────────
+        self._selected_square: int | None = None   # chess.Square index
+        self._last_move:  tuple | None    = None   # (from_sq, to_sq)
+
+        # Click binding
+        self.bind("<Button-1>", self._on_click)
+        # Resize binding
+        self.bind("<Configure>", self._on_resize)
+
+    # ─────────────────────────────────────────
+    #  COORDINATE → PIXEL HELPERS
+    # ─────────────────────────────────────────
+    def _sq_to_xy(self, sq: int) -> tuple[float, float]:
+        """Return the top-left (x, y) pixel of the given chess square."""
+        file = chess.square_file(sq)
+        rank = chess.square_rank(sq)
+        if self.flipped:
+            col = 7 - file
+            row = rank
+        else:
+            col = file
+            row = 7 - rank
+        return col * self.sq_size, row * self.sq_size
+
+    def _xy_to_sq(self, px: float, py: float) -> int | None:
+        """Return chess.Square index for pixel (px, py), or None if outside."""
+        col = int(px // self.sq_size)
+        row = int(py // self.sq_size)
+        if not (0 <= col < 8 and 0 <= row < 8):
+            return None
+        if self.flipped:
+            file = 7 - col
+            rank = row
+        else:
+            file = col
+            rank = 7 - row
+        return chess.square(file, rank)
+
+    def _sq_center(self, sq: int) -> tuple[float, float]:
+        x, y = self._sq_to_xy(sq)
+        half = self.sq_size / 2
+        return x + half, y + half
+
+    # ─────────────────────────────────────────
+    #  FULL BOARD REDRAW
+    # ─────────────────────────────────────────
+    def full_redraw(self):
+        """
+        Wipe and repaint the entire canvas:
+          1. Board squares
+          2. Coordinate labels
+          3. Highlight overlays (last-move)
+          4. All pieces at rest positions
+        """
+        self.delete("all")
+        self.piece_items.clear()
+        self._last_move_items.clear()
+        self._selected_item = None
+
+        self._draw_squares()
+        self._draw_coords()
+        self._draw_last_move_highlights()
+        self._draw_pieces()
+        self._draw_selected_highlight()
+
+    def _draw_squares(self):
+        """Draw 64 coloured rectangles for the board."""
+        light = self.theme["light"]
+        dark  = self.theme["dark"]
+        s = self.sq_size
+        for row in range(8):
+            for col in range(8):
+                is_light = (row + col) % 2 == 0
+                color = light if is_light else dark
+                self.create_rectangle(
+                    col * s, row * s,
+                    (col + 1) * s, (row + 1) * s,
+                    fill=color, outline="", tags="square"
+                )
+
+    def _draw_coords(self):
+        """
+        Draw rank numbers (1-8) on left edge of each rank row and
+        file letters (a-h) on bottom edge of each file column.
+        These overlap the squares for a Lichess-style embedded look.
+        """
+        s    = self.sq_size
+        cols = self.theme["coords"]
+        files = "abcdefgh"
+
+        for i in range(8):
+            # --- Rank numbers on the left side of rank row ---
+            if self.flipped:
+                rank_num = str(i + 1)
+            else:
+                rank_num = str(8 - i)
+
+            self.create_text(
+                3, i * s + 4,
+                text=rank_num, anchor="nw",
+                font=COORD_FONT, fill=cols,
+                tags="coord"
+            )
+
+            # --- File letters on the bottom of file column ---
+            if self.flipped:
+                file_letter = files[7 - i]
+            else:
+                file_letter = files[i]
+
+            self.create_text(
+                (i + 1) * s - 3, 8 * s - 3,
+                text=file_letter, anchor="se",
+                font=COORD_FONT, fill=cols,
+                tags="coord"
+            )
+
+    def _draw_last_move_highlights(self):
+        """
+        Composite a semi-transparent colour over the from/to squares
+        of the most recent move.  We draw this as a translucent overlay
+        rectangle using PIL → ImageTk compositing trick.
+        """
+        if not self._last_move:
+            return
+
+        r, g, b, a = self.theme["last_move"]
+        s = self.sq_size
+
+        for sq in self._last_move:
+            x, y = self._sq_to_xy(sq)
+            # Create a small RGBA image and paste it as a canvas image
+            overlay = Image.new("RGBA", (s, s), (r, g, b, a))
+            tk_img = ImageTk.PhotoImage(overlay)
+            item = self.create_image(x, y, anchor="nw", image=tk_img, tags="highlight")
+            # Keep a reference so Python GC doesn't delete the PhotoImage
+            self._store_ref(item, tk_img)
+            self._last_move_items.append(item)
+
+    def _draw_selected_highlight(self):
+        """Draw a subtle radial ring on the selected square if any."""
+        if self._selected_square is None:
+            return
+        r, g, b, a = self.theme["selected"]
+        s = self.sq_size
+        x, y = self._sq_to_xy(self._selected_square)
+
+        # Draw a filled overlay with ring appearance using PIL
+        overlay = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+        draw    = ImageDraw.Draw(overlay)
+        # Outer filled rect at alpha/4 for background tint
+        draw.rectangle([0, 0, s - 1, s - 1], fill=(r, g, b, a // 4))
+        # Inner border ring
+        border = max(3, s // 12)
+        draw.rectangle([0, 0, s - 1, s - 1], outline=(r, g, b, a), width=border)
+
+        tk_img = ImageTk.PhotoImage(overlay)
+        item   = self.create_image(x, y, anchor="nw", image=tk_img, tags="selected_hl")
+        self._store_ref(item, tk_img)
+        self._selected_item = item
+
+    def _draw_pieces(self):
+        """
+        Place all pieces from self.chess_board onto the canvas as image items.
+        Each piece item is stored in self.piece_items[square] so animation
+        can move them individually.
+        """
+        if not self.chess_board:
+            return
+        for sq in chess.SQUARES:
+            piece = self.chess_board.piece_at(sq)
+            if piece:
+                tk_img = self.piece_tk.get(piece.symbol())
+                if tk_img:
+                    x, y  = self._sq_to_xy(sq)
+                    item  = self.create_image(
+                        x, y, anchor="nw", image=tk_img, tags="piece"
+                    )
+                    self.piece_items[sq] = item
+                    self._store_ref(item, tk_img)
+
+    # ─────────────────────────────────────────
+    #  IMAGE REFERENCE MANAGEMENT
+    #  Canvas image items need a live Python
+    #  reference or the GC deletes the image.
+    # ─────────────────────────────────────────
+    def _store_ref(self, item_id: int, tk_img: ImageTk.PhotoImage):
+        """Attach a reference to the canvas item so GC won't collect it."""
+        if not hasattr(self, "_img_refs"):
+            self._img_refs = {}
+        self._img_refs[item_id] = tk_img
+
+    def _clear_refs(self):
+        if hasattr(self, "_img_refs"):
+            self._img_refs.clear()
+
+    # ─────────────────────────────────────────
+    #  PIECE IMAGE LOADING / RESCALING
+    # ─────────────────────────────────────────
+    def load_pieces(self, pil_images: dict[str, Image.Image]):
+        """
+        Receive freshly loaded PIL images from the loader thread,
+        scale them to the current square size, and cache as PhotoImages.
+        """
+        self.piece_pil = pil_images
+        self._rescale_pieces()
+
+    def _rescale_pieces(self):
+        """
+        Rescale all cached PIL images to the current sq_size using LANCZOS.
+        Call this whenever the canvas is resized.
+        """
+        s = self.sq_size
+        self.piece_tk.clear()
+        for symbol, pil_img in self.piece_pil.items():
+            scaled = pil_img.resize((s, s), Image.Resampling.LANCZOS)
+            self.piece_tk[symbol] = ImageTk.PhotoImage(scaled)
+
+    # ─────────────────────────────────────────
+    #  RESIZE HANDLER
+    # ─────────────────────────────────────────
+    def _on_resize(self, event):
+        """
+        When the canvas widget is resized, recalculate sq_size,
+        rescale piece images, and do a full redraw.
+        """
+        new_size = min(event.width, event.height)
+        if new_size < 200:
+            return
+        self.sq_size = new_size // 8
+        self.board_size = new_size
+        # Cancel any ongoing animation first
+        self._cancel_animations()
+        if self.piece_pil:
+            self._rescale_pieces()
+        self.full_redraw()
+
+    # ─────────────────────────────────────────
+    #  THEME CHANGE
+    # ─────────────────────────────────────────
+    def set_theme(self, theme_name: str):
+        self.theme_name = theme_name
+        self.theme      = THEMES[theme_name]
+        self.full_redraw()
+
+    # ─────────────────────────────────────────
+    #  CLICK INTERACTION
+    # ─────────────────────────────────────────
+    def _on_click(self, event):
+        sq = self._xy_to_sq(event.x, event.y)
+        if sq is None:
+            return
+        # Toggle selection
+        if self._selected_square == sq:
+            self._selected_square = None
+        else:
+            self._selected_square = sq
+
+        # Redraw only the selection overlay for speed
+        if self._selected_item is not None:
+            self.delete(self._selected_item)
+            self._selected_item = None
+        self._draw_selected_highlight()
+
+    # ─────────────────────────────────────────
+    #  ANIMATION ENGINE
+    # ─────────────────────────────────────────
+    @staticmethod
+    def _ease_out_cubic(t: float) -> float:
+        """f(t) = 1 - (1-t)³  →  explosive start, micro-soft landing."""
+        return 1.0 - (1.0 - t) ** 3
+
+    def _cancel_animations(self):
+        """Immediately cancel all running animations without finalising."""
+        if self._anim_job:
+            self.after_cancel(self._anim_job)
+            self._anim_job = None
+        self._animations.clear()
+
+    def _finish_animations_instantly(self):
+        """
+        Snap all in-flight animated pieces to their final destination.
+        Used for debounced skip: finish current move immediately,
+        then allow the next one to start cleanly.
+        """
+        for anim in self._animations:
+            self.coords(anim["item"], anim["ex"], anim["ey"])
+            if anim.get("on_done"):
+                anim["on_done"]()
+        self._animations.clear()
+        if self._anim_job:
+            self.after_cancel(self._anim_job)
+            self._anim_job = None
+
+    def animate_pieces(
+        self,
+        moves_data: list[dict],
+        on_complete: callable,
+    ):
+        """
+        Animate one or more piece movements simultaneously.
+
+        moves_data: list of dicts, each containing:
+          {
+            "item":       canvas image item id,
+            "start_sq":   chess.Square (for coordinate lookup),
+            "end_sq":     chess.Square,
+            "on_done":    optional per-piece callback (None for most),
+          }
+        on_complete: called once ALL moves in this batch are done.
+        """
+        # If something is already animating, finish it instantly first
+        if self._animations:
+            self._finish_animations_instantly()
+
+        now_ms = time.monotonic() * 1000
+        batch_remaining = [len(moves_data)]  # mutable counter for closure
+
+        def batch_done():
+            batch_remaining[0] -= 1
+            if batch_remaining[0] <= 0:
+                on_complete()
+
+        for md in moves_data:
+            sx, sy = self._sq_to_xy(md["start_sq"])
+            ex, ey = self._sq_to_xy(md["end_sq"])
+
+            # Dynamic duration based on pixel distance
+            dist_sq  = math.hypot(
+                chess.square_file(md["end_sq"]) - chess.square_file(md["start_sq"]),
+                chess.square_rank(md["end_sq"]) - chess.square_rank(md["start_sq"])
+            )
+            max_dist = math.hypot(7, 7)  # max board distance
+            t_ratio  = dist_sq / max_dist
+            dur_ms   = ANIM_MIN_MS + (ANIM_MAX_MS - ANIM_MIN_MS) * t_ratio
+
+            self._animations.append({
+                "item":       md["item"],
+                "sx": sx, "sy": sy,
+                "ex": ex, "ey": ey,
+                "duration_ms": dur_ms,
+                "start_ms":    now_ms,
+                "on_done":     batch_done,
+            })
+
+        # Ensure piece items are raised above highlights
+        for md in moves_data:
+            self.tag_raise(md["item"])
+
+        self._tick_animation()
+
+    def _tick_animation(self):
+        """
+        Inner animation loop.  Runs at ANIM_TICK_MS intervals.
+        For each active animation, computes eased position and
+        moves the canvas item.  Removes finished animations.
+        """
+        now_ms   = time.monotonic() * 1000
+        finished = []
+
+        for anim in self._animations:
+            elapsed = now_ms - anim["start_ms"]
+            raw_t   = min(elapsed / anim["duration_ms"], 1.0)
+            t       = self._ease_out_cubic(raw_t)
+
+            cx = anim["sx"] + (anim["ex"] - anim["sx"]) * t
+            cy = anim["sy"] + (anim["ey"] - anim["sy"]) * t
+            self.coords(anim["item"], cx, cy)
+
+            if raw_t >= 1.0:
+                finished.append(anim)
+
+        # Fire callbacks and clean up
+        for anim in finished:
+            self._animations.remove(anim)
+            if anim["on_done"]:
+                anim["on_done"]()
+
+        if self._animations:
+            # Schedule next tick
+            self._anim_job = self.after(ANIM_TICK_MS, self._tick_animation)
+        else:
+            self._anim_job = None
+
+    # ─────────────────────────────────────────
+    #  PUBLIC: UPDATE PIECE AT SQUARE
+    #  (called after board state changes)
+    # ─────────────────────────────────────────
+    def update_piece_at(self, sq: int):
+        """
+        Refresh the canvas image item for a single square.
+        Removes existing item if any, places new one if a piece is there.
+        """
+        if sq in self.piece_items:
+            self.delete(self.piece_items.pop(sq))
+
+        if not self.chess_board:
+            return
+        piece = self.chess_board.piece_at(sq)
+        if piece:
+            tk_img = self.piece_tk.get(piece.symbol())
+            if tk_img:
+                x, y  = self._sq_to_xy(sq)
+                item  = self.create_image(x, y, anchor="nw", image=tk_img, tags="piece")
+                self.piece_items[sq] = item
+                self._store_ref(item, tk_img)
+
+    def set_last_move(self, from_sq: int | None, to_sq: int | None):
+        """Update the last-move highlight squares and redraw overlays."""
+        # Remove existing highlights
+        for item in self._last_move_items:
+            self.delete(item)
+        self._last_move_items.clear()
+
+        if from_sq is not None and to_sq is not None:
+            self._last_move = (from_sq, to_sq)
+        else:
+            self._last_move = None
+
+        self._draw_last_move_highlights()
+        # Ensure pieces are above highlights
+        self.tag_raise("piece")
+
+    def flip_board(self):
+        self.flipped = not self.flipped
+        self.full_redraw()
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  MAIN APPLICATION
+# ═══════════════════════════════════════════════════════════════════
 class PGNViewerApp(ctk.CTk):
+    """
+    Main application window.  Orchestrates:
+      - Piece downloading in a background thread
+      - Board state management via python-chess
+      - Animation sequencing (forward / backward with castling)
+      - UI layout: canvas board + sidebar controls
+    """
+
+    WINDOW_W = 1080
+    WINDOW_H = 780
+
     def __init__(self):
         super().__init__()
 
-        self.title("Pro PGN Viewer")
-        self.geometry("950x750")
-        
-        self.moves = []
+        ctk.set_appearance_mode("Dark")
+        ctk.set_default_color_theme("blue")
+
+        self.title("♛  Premium PGN Viewer")
+        self.geometry(f"{self.WINDOW_W}x{self.WINDOW_H}")
+        self.minsize(800, 600)
+
+        # ── Game state ───────────────────────
+        self.chess_board        = chess.Board()
+        self.moves: list[chess.Move] = []
         self.current_move_index = 0
-        self.board = chess.Board()
 
-        # Animation states
-        self.is_animating = False
-        self.anim_label = None
-        self.anim_job = None
-        self.pending_move = None
-        self.pending_undo = False
+        # ── Asset state ──────────────────────
+        self.current_pack   = "Alpha"
+        self.current_theme  = "Lichess Wood"
+        self._piece_pil_cache: dict[str, dict[str, Image.Image]] = {}  # pack → {sym: PIL}
 
-        # Transparent image for clearing squares
-        self.empty_image = ctk.CTkImage(Image.new("RGBA", (1, 1), (0, 0, 0, 0)), size=(65, 65))
+        # ── Animation gating ─────────────────
+        # Pending move queued while animation is running
+        self._pending_action: dict | None = None
+        self._animating = False
 
-        # Download pieces
-        self.piece_images = {}
-        self.download_pieces()
+        # ── Build UI ─────────────────────────
+        self._build_layout()
 
-        # UI Setup
+        # Start downloading default piece pack asynchronously
+        self._start_piece_download(self.current_pack)
+
+    # ─────────────────────────────────────────
+    #  UI LAYOUT
+    # ─────────────────────────────────────────
+    def _build_layout(self):
         self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, weight=2)
-        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=3)   # board side
+        self.grid_columnconfigure(1, weight=1)   # sidebar
 
-        # Board Container (Left)
-        self.board_container = ctk.CTkFrame(self, fg_color="transparent")
-        self.board_container.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
+        # ── Left: Board frame ─────────────────
+        board_frame = ctk.CTkFrame(self, fg_color="#0f0f1a", corner_radius=16)
+        board_frame.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
+        board_frame.grid_rowconfigure(0, weight=1)
+        board_frame.grid_columnconfigure(0, weight=1)
 
-        # Make the grid 9x9 to fit the coordinates (ranks 0..7, rank labels 8, files 1..8, file labels 0)
-        for i in range(1, 9):
-            self.board_container.grid_rowconfigure(i-1, weight=1, uniform="square")
-            self.board_container.grid_columnconfigure(i, weight=1, uniform="square")
-            
-        self.board_container.grid_rowconfigure(8, weight=0, minsize=30)
-        self.board_container.grid_columnconfigure(0, weight=0, minsize=30)
+        # We size the canvas inside the frame and let it expand
+        self.board_canvas = ChessBoardCanvas(
+            board_frame,
+            size=640,
+            theme_name=self.current_theme,
+        )
+        self.board_canvas.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
+        self.board_canvas.chess_board = self.chess_board
 
-        self.squares = {}
-        self.current_theme = "Classic Wood"
-        self.draw_board()
+        # ── Right: Sidebar ────────────────────
+        sidebar = ctk.CTkScrollableFrame(self, fg_color="#12122a", corner_radius=16, width=290)
+        sidebar.grid(row=0, column=1, padx=(0, 20), pady=20, sticky="nsew")
+        sidebar.grid_columnconfigure(0, weight=1)
 
-        # Controls Frame (Right)
-        self.controls_frame = ctk.CTkFrame(self)
-        self.controls_frame.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
-        self.controls_frame.grid_columnconfigure(0, weight=1)
+        self._build_sidebar(sidebar)
 
-        # --- Game Info Panel ---
-        self.game_info_frame = ctk.CTkFrame(self.controls_frame)
-        self.game_info_frame.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
-        self.game_info_frame.grid_columnconfigure(0, weight=1)
-        
-        self.matchup_label = ctk.CTkLabel(self.game_info_frame, text="White vs Black", font=("Arial", 16, "bold"))
-        self.matchup_label.grid(row=0, column=0, pady=(10, 2), padx=10)
-        
-        self.site_label = ctk.CTkLabel(self.game_info_frame, text="Event / Site", font=("Arial", 12))
-        self.site_label.grid(row=1, column=0, pady=2, padx=10)
-        
-        self.result_label = ctk.CTkLabel(self.game_info_frame, text="Result", font=("Arial", 14, "bold"))
-        self.result_label.grid(row=2, column=0, pady=(2, 10), padx=10)
+        # Initial static board render (no pieces yet)
+        self.board_canvas.full_redraw()
 
+    def _build_sidebar(self, parent):
+        """Construct all sidebar panels."""
+        row = 0
 
-        # --- Settings & Loading ---
-        self.settings_frame = ctk.CTkFrame(self.controls_frame, fg_color="transparent")
-        self.settings_frame.grid(row=1, column=0, padx=10, pady=10, sticky="ew")
-        self.settings_frame.grid_columnconfigure((0,1), weight=1)
+        # ── App title ─────────────────────────
+        title = ctk.CTkLabel(
+            parent, text="♛  PGN Viewer",
+            font=("Georgia", 22, "bold"),
+            text_color="#e8d5a3"
+        )
+        title.grid(row=row, column=0, pady=(18, 4)); row += 1
 
-        self.theme_label = ctk.CTkLabel(self.settings_frame, text="Board Theme:", font=("Arial", 12, "bold"))
-        self.theme_label.grid(row=0, column=0, padx=5, sticky="w")
-        
-        self.theme_dropdown = ctk.CTkOptionMenu(self.settings_frame, values=list(THEMES.keys()), command=self.change_theme)
-        self.theme_dropdown.grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+        subtitle = ctk.CTkLabel(
+            parent, text="Premium Edition",
+            font=("Georgia", 11, "italic"),
+            text_color="#7a6a50"
+        )
+        subtitle.grid(row=row, column=0, pady=(0, 14)); row += 1
 
-        # PGN Input
-        self.pgn_label = ctk.CTkLabel(self.controls_frame, text="Paste PGN or FEN Here:", font=("Arial", 12, "bold"))
-        self.pgn_label.grid(row=2, column=0, padx=10, sticky="w")
-        
-        self.pgn_textbox = ctk.CTkTextbox(self.controls_frame, height=200)
-        self.pgn_textbox.grid(row=3, column=0, padx=10, pady=5, sticky="ew")
+        sep1 = ctk.CTkFrame(parent, height=1, fg_color="#2a2a4a")
+        sep1.grid(row=row, column=0, sticky="ew", padx=10, pady=6); row += 1
 
-        # Load Buttons
-        self.load_buttons_frame = ctk.CTkFrame(self.controls_frame, fg_color="transparent")
-        self.load_buttons_frame.grid(row=4, column=0, padx=10, pady=5, sticky="ew")
-        self.load_buttons_frame.grid_columnconfigure((0, 1), weight=1)
+        # ── Game info ─────────────────────────
+        self.matchup_label = ctk.CTkLabel(
+            parent, text="White vs Black",
+            font=("Georgia", 14, "bold"),
+            text_color="#c8b88a", wraplength=260
+        )
+        self.matchup_label.grid(row=row, column=0, pady=(8, 2)); row += 1
 
-        self.load_btn = ctk.CTkButton(self.load_buttons_frame, text="Load Text", command=self.load_pgn_from_text)
-        self.load_btn.grid(row=0, column=0, padx=5, sticky="ew")
+        self.event_label = ctk.CTkLabel(
+            parent, text="—", font=("Segoe UI", 11),
+            text_color="#8a7a60", wraplength=260
+        )
+        self.event_label.grid(row=row, column=0, pady=2); row += 1
 
-        self.browse_btn = ctk.CTkButton(self.load_buttons_frame, text="Browse File...", command=self.browse_file)
-        self.browse_btn.grid(row=0, column=1, padx=5, sticky="ew")
+        self.result_label = ctk.CTkLabel(
+            parent, text="", font=("Georgia", 13, "bold"),
+            text_color="#d4a843"
+        )
+        self.result_label.grid(row=row, column=0, pady=(2, 10)); row += 1
 
+        sep2 = ctk.CTkFrame(parent, height=1, fg_color="#2a2a4a")
+        sep2.grid(row=row, column=0, sticky="ew", padx=10, pady=6); row += 1
 
-        # --- Move Controls ---
-        self.move_controls = ctk.CTkFrame(self.controls_frame, fg_color="transparent")
-        self.move_controls.grid(row=5, column=0, padx=10, pady=20, sticky="ew")
-        self.move_controls.grid_columnconfigure((0, 1), weight=1)
+        # ── Move Counter ──────────────────────
+        self.move_label = ctk.CTkLabel(
+            parent, text="Move  0 / 0",
+            font=("Courier New", 18, "bold"),
+            text_color="#e0d0b0"
+        )
+        self.move_label.grid(row=row, column=0, pady=(10, 6)); row += 1
 
-        self.prev_btn = ctk.CTkButton(self.move_controls, text="< Previous", command=self.prev_move, font=("Arial", 14))
-        self.prev_btn.grid(row=0, column=0, padx=5, pady=5)
+        # ── Navigation buttons ────────────────
+        nav_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        nav_frame.grid(row=row, column=0, padx=10, pady=6, sticky="ew"); row += 1
+        nav_frame.grid_columnconfigure((0, 1, 2, 3), weight=1)
 
-        self.next_btn = ctk.CTkButton(self.move_controls, text="Next >", command=self.next_move, font=("Arial", 14))
-        self.next_btn.grid(row=0, column=1, padx=5, pady=5)
-        
-        self.info_label = ctk.CTkLabel(self.controls_frame, text="Move 0 / 0", font=("Arial", 16))
-        self.info_label.grid(row=6, column=0, pady=(0, 10))
+        btn_style = {"font": ("Segoe UI", 13), "corner_radius": 8,
+                     "height": 36, "fg_color": "#1e1e3a",
+                     "hover_color": "#2a2a5a", "border_color": "#3a3a5a",
+                     "border_width": 1}
 
-        self.update_board_ui()
-        self.update_buttons()
+        self.start_btn = ctk.CTkButton(nav_frame, text="⏮", command=self._goto_start, width=44, **btn_style)
+        self.start_btn.grid(row=0, column=0, padx=3)
 
-    def download_pieces(self):
-        os.makedirs("pieces_alpha", exist_ok=True)
-        for symbol, filename in PIECE_URLS.items():
-            filepath = os.path.join("pieces_alpha", filename)
+        self.prev_btn = ctk.CTkButton(nav_frame, text="◀", command=self._prev_move, width=54, **btn_style)
+        self.prev_btn.grid(row=0, column=1, padx=3)
+
+        self.next_btn = ctk.CTkButton(nav_frame, text="▶", command=self._next_move, width=54, **btn_style)
+        self.next_btn.grid(row=0, column=2, padx=3)
+
+        self.end_btn = ctk.CTkButton(nav_frame, text="⏭", command=self._goto_end, width=44, **btn_style)
+        self.end_btn.grid(row=0, column=3, padx=3)
+
+        # Flip board
+        self.flip_btn = ctk.CTkButton(
+            parent, text="⇅  Flip Board", command=self._flip_board,
+            font=("Segoe UI", 12), corner_radius=8, height=32,
+            fg_color="#1a2a1a", hover_color="#2a4a2a",
+            border_color="#3a5a3a", border_width=1
+        )
+        self.flip_btn.grid(row=row, column=0, padx=10, pady=(4, 10), sticky="ew"); row += 1
+
+        sep3 = ctk.CTkFrame(parent, height=1, fg_color="#2a2a4a")
+        sep3.grid(row=row, column=0, sticky="ew", padx=10, pady=6); row += 1
+
+        # ── Board Theme ───────────────────────
+        ctk.CTkLabel(parent, text="Board Theme", font=("Segoe UI", 12, "bold"),
+                     text_color="#a090c0").grid(row=row, column=0, padx=12, sticky="w"); row += 1
+
+        self.theme_menu = ctk.CTkOptionMenu(
+            parent, values=list(THEMES.keys()),
+            command=self._change_theme,
+            font=("Segoe UI", 12), dropdown_font=("Segoe UI", 12),
+            corner_radius=8, height=32
+        )
+        self.theme_menu.set(self.current_theme)
+        self.theme_menu.grid(row=row, column=0, padx=10, pady=(4, 10), sticky="ew"); row += 1
+
+        # ── Piece Pack ────────────────────────
+        ctk.CTkLabel(parent, text="Piece Style", font=("Segoe UI", 12, "bold"),
+                     text_color="#a090c0").grid(row=row, column=0, padx=12, sticky="w"); row += 1
+
+        self.pack_menu = ctk.CTkOptionMenu(
+            parent, values=list(PIECE_PACKS.keys()),
+            command=self._change_piece_pack,
+            font=("Segoe UI", 12), dropdown_font=("Segoe UI", 12),
+            corner_radius=8, height=32
+        )
+        self.pack_menu.set(self.current_pack)
+        self.pack_menu.grid(row=row, column=0, padx=10, pady=(4, 10), sticky="ew"); row += 1
+
+        self.pack_status = ctk.CTkLabel(
+            parent, text="", font=("Segoe UI", 10),
+            text_color="#608060"
+        )
+        self.pack_status.grid(row=row, column=0, pady=2); row += 1
+
+        sep4 = ctk.CTkFrame(parent, height=1, fg_color="#2a2a4a")
+        sep4.grid(row=row, column=0, sticky="ew", padx=10, pady=6); row += 1
+
+        # ── PGN / FEN Input ───────────────────
+        ctk.CTkLabel(parent, text="Paste PGN or FEN", font=("Segoe UI", 12, "bold"),
+                     text_color="#a090c0").grid(row=row, column=0, padx=12, sticky="w"); row += 1
+
+        self.pgn_text = ctk.CTkTextbox(
+            parent, height=160,
+            font=("Courier New", 11),
+            corner_radius=8,
+            border_color="#3a3a5a", border_width=1
+        )
+        self.pgn_text.grid(row=row, column=0, padx=10, pady=(4, 6), sticky="ew"); row += 1
+
+        btn_row = ctk.CTkFrame(parent, fg_color="transparent")
+        btn_row.grid(row=row, column=0, padx=10, pady=4, sticky="ew"); row += 1
+        btn_row.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkButton(
+            btn_row, text="Load Text", command=self._load_from_text,
+            font=("Segoe UI", 12), corner_radius=8, height=32,
+            fg_color="#1e3050", hover_color="#2a4070"
+        ).grid(row=0, column=0, padx=3, sticky="ew")
+
+        ctk.CTkButton(
+            btn_row, text="Browse…", command=self._browse_file,
+            font=("Segoe UI", 12), corner_radius=8, height=32,
+            fg_color="#1e3050", hover_color="#2a4070"
+        ).grid(row=0, column=1, padx=3, sticky="ew")
+
+        self.status_label = ctk.CTkLabel(
+            parent, text="No game loaded", font=("Segoe UI", 11),
+            text_color="#607060", wraplength=260
+        )
+        self.status_label.grid(row=row, column=0, pady=(6, 16)); row += 1
+
+    # ─────────────────────────────────────────
+    #  PIECE DOWNLOADING
+    # ─────────────────────────────────────────
+    def _start_piece_download(self, pack_name: str):
+        """
+        Download a piece pack in a background thread to avoid blocking the UI.
+        Once done, push the images into the canvas via self.after().
+        """
+        self.pack_status.configure(text=f"⬇  Downloading {pack_name}…")
+        t = threading.Thread(
+            target=self._download_pack_thread,
+            args=(pack_name,),
+            daemon=True
+        )
+        t.start()
+
+    def _download_pack_thread(self, pack_name: str):
+        """Background thread: download + load PIL images for a pack."""
+        pack   = PIECE_PACKS[pack_name]
+        folder = pack["folder"]
+        os.makedirs(folder, exist_ok=True)
+
+        images = {}
+        for symbol, filename in pack["files"].items():
+            filepath = os.path.join(folder, filename)
             if not os.path.exists(filepath):
                 try:
-                    print(f"Downloading {filename}...")
-                    urllib.request.urlretrieve(BASE_URL + filename, filepath)
+                    url = pack["base_url"] + filename
+                    urllib.request.urlretrieve(url, filepath)
                 except Exception as e:
-                    print(f"Failed to download {filename}: {e}")
-            
-            if os.path.exists(filepath):
-                # Using 65x65 size for alpha pieces for crisp resolution
-                img = Image.open(filepath)
-                self.piece_images[symbol] = ctk.CTkImage(light_image=img, dark_image=img, size=(65, 65))
-
-    def change_theme(self, choice):
-        self.current_theme = choice
-        self.recolor_board()
-
-    def draw_board(self):
-        # Draw Rank Labels (1-8)
-        for row in range(8):
-            rank_label = ctk.CTkLabel(self.board_container, text=str(8 - row), font=("Arial", 16, "bold"))
-            rank_label.grid(row=row, column=0, sticky="e", padx=(0, 10))
-
-        # Draw File Labels (A-H)
-        files = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
-        for col in range(8):
-            file_label = ctk.CTkLabel(self.board_container, text=files[col], font=("Arial", 16, "bold"))
-            file_label.grid(row=8, column=col + 1, sticky="n", pady=(10, 0))
-
-        # Draw Squares
-        for row in range(8):
-            for col in range(8):
-                is_light = (row + col) % 2 == 0
-                bg_color = THEMES[self.current_theme]["light"] if is_light else THEMES[self.current_theme]["dark"]
-
-                rank = 7 - row
-                file = col
-                square_index = chess.square(file, rank)
-
-                label = ctk.CTkLabel(
-                    self.board_container, 
-                    text="", 
-                    fg_color=bg_color,
-                    corner_radius=0
-                )
-                label.grid(row=row, column=col + 1, sticky="nsew") # col + 1 to offset rank labels
-                self.squares[square_index] = label
-
-    def recolor_board(self):
-        for row in range(8):
-            for col in range(8):
-                is_light = (row + col) % 2 == 0
-                bg_color = THEMES[self.current_theme]["light"] if is_light else THEMES[self.current_theme]["dark"]
-
-                rank = 7 - row
-                file = col
-                square_index = chess.square(file, rank)
-                self.squares[square_index].configure(fg_color=bg_color)
-
-    def browse_file(self):
-        filename = ctk.filedialog.askopenfilename(
-            filetypes=[("PGN Files", "*.pgn"), ("Text Files", "*.txt"), ("All Files", "*.*")]
-        )
-        if filename:
+                    print(f"[Download] Failed {filename}: {e}")
+                    continue
             try:
-                with open(filename, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    self.pgn_textbox.delete("1.0", "end")
-                    self.pgn_textbox.insert("1.0", content)
-                    self.load_pgn_from_text(content)
+                img = Image.open(filepath).convert("RGBA")
+                images[symbol] = img
             except Exception as e:
-                self.info_label.configure(text=f"Error reading file: {e}")
+                print(f"[Load] Failed {filename}: {e}")
 
-    def load_pgn_from_text(self, text=None):
-        self.finish_animation() # cancel any ongoing animation
+        # Schedule delivery back on the main thread
+        self.after(0, lambda: self._on_pack_loaded(pack_name, images))
 
+    def _on_pack_loaded(self, pack_name: str, images: dict):
+        """Called on main thread once a pack's images are ready."""
+        self._piece_pil_cache[pack_name] = images
+        if pack_name == self.current_pack:
+            self.board_canvas.load_pieces(images)
+            self.board_canvas.full_redraw()
+            self.pack_status.configure(text=f"✔  {pack_name} loaded")
+
+    # ─────────────────────────────────────────
+    #  THEME & PACK SWITCHING
+    # ─────────────────────────────────────────
+    def _change_theme(self, choice: str):
+        self.current_theme = choice
+        self.board_canvas.set_theme(choice)
+
+    def _change_piece_pack(self, choice: str):
+        self.current_pack = choice
+        if choice in self._piece_pil_cache:
+            # Already downloaded — just swap
+            self.board_canvas.load_pieces(self._piece_pil_cache[choice])
+            self.board_canvas.full_redraw()
+            self.pack_status.configure(text=f"✔  {choice} loaded")
+        else:
+            self._start_piece_download(choice)
+
+    # ─────────────────────────────────────────
+    #  PGN / FEN LOADING
+    # ─────────────────────────────────────────
+    def _browse_file(self):
+        path = filedialog.askopenfilename(
+            title="Open PGN File",
+            filetypes=[("PGN Files", "*.pgn"), ("All Files", "*.*")]
+        )
+        if path:
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                self.pgn_text.delete("1.0", "end")
+                self.pgn_text.insert("1.0", content)
+                self._load_from_text(content)
+            except Exception as e:
+                self.status_label.configure(text=f"Error: {e}")
+
+    def _load_from_text(self, text: str | None = None):
+        """Parse text from the textbox (or supplied string) as PGN or FEN."""
+        # Cancel any in-flight animation
+        self._cancel_current_animation()
+
+        if text is None:
+            text = self.pgn_text.get("1.0", "end-1c").strip()
         if not text:
-            text = self.pgn_textbox.get("1.0", "end-1c").strip()
-        if not text:
-            self.info_label.configure(text="Please paste PGN/FEN text.")
+            self.status_label.configure(text="Please paste PGN or FEN text.")
             return
 
-        # Check if FEN
-        if len(text.split('/')) >= 7 and '{' not in text and '[' not in text:
+        # ── Try FEN ──────────────────────────
+        if len(text.split("/")) >= 7 and "{" not in text and "[" not in text:
             try:
-                self.board.set_fen(text)
+                self.chess_board.set_fen(text.strip())
                 self.moves = []
                 self.current_move_index = 0
                 self.matchup_label.configure(text="Static FEN Position")
-                self.site_label.configure(text="Custom Board Setup")
+                self.event_label.configure(text="Custom Board Setup")
                 self.result_label.configure(text="")
-                self.info_label.configure(text="FEN Loaded Successfully")
-                self.update_board_ui()
-                self.update_buttons()
+                self.status_label.configure(text="FEN loaded ✔")
+                self._refresh_board_full()
+                self._update_ui()
                 return
             except ValueError:
-                pass # Not a valid FEN, fallback to PGN parsing
+                pass  # fall through to PGN
 
-        # Parse as PGN
+        # ── Try PGN ──────────────────────────
         try:
             game = chess.pgn.read_game(io.StringIO(text))
-            if game:
-                self.moves = list(game.mainline_moves())
-                
-                # Extract metadata
-                white = game.headers.get("White", "Unknown Player")
-                black = game.headers.get("Black", "Unknown Player")
-                white_elo = game.headers.get("WhiteElo", "?")
-                black_elo = game.headers.get("BlackElo", "?")
-                site = game.headers.get("Site", "Unknown Site")
-                event = game.headers.get("Event", "Unknown Event")
-                result = game.headers.get("Result", "*")
-                termination = game.headers.get("Termination", "")
+            if not game:
+                self.status_label.configure(text="Could not parse PGN.")
+                return
 
-                # Update UI elements
-                self.matchup_label.configure(text=f"♔ {white} ({white_elo})  vs  ♚ {black} ({black_elo})")
-                self.site_label.configure(text=f"📍 {event} - {site}")
-                term_text = f" - {termination}" if termination else ""
-                self.result_label.configure(text=f"🏆 Result: {result}{term_text}")
-                
-                self.board.reset()
-                self.current_move_index = 0
-                self.update_board_ui()
-                self.update_buttons()
-            else:
-                self.info_label.configure(text="Failed to parse PGN.")
+            self.moves = list(game.mainline_moves())
+            self.chess_board.reset()
+            self.current_move_index = 0
+
+            # Metadata
+            white = game.headers.get("White", "?")
+            black = game.headers.get("Black", "?")
+            w_elo = game.headers.get("WhiteElo", "")
+            b_elo = game.headers.get("BlackElo", "")
+            event = game.headers.get("Event", "")
+            site  = game.headers.get("Site", "")
+            result = game.headers.get("Result", "*")
+            term   = game.headers.get("Termination", "")
+
+            elo_w = f" ({w_elo})" if w_elo else ""
+            elo_b = f" ({b_elo})" if b_elo else ""
+            self.matchup_label.configure(text=f"♔ {white}{elo_w}  vs  ♚ {black}{elo_b}")
+            ev_str = " · ".join(x for x in [event, site] if x)
+            self.event_label.configure(text=ev_str or "—")
+            res_str = f"Result: {result}" + (f"  —  {term}" if term else "")
+            self.result_label.configure(text=res_str)
+            self.status_label.configure(text=f"Loaded {len(self.moves)} moves ✔")
+
+            board_canvas = self.board_canvas
+            board_canvas.set_last_move(None, None)
+            board_canvas._selected_square = None
+            self._refresh_board_full()
+            self._update_ui()
+
         except Exception as e:
-            self.info_label.configure(text=f"Error parsing game: {e}")
+            self.status_label.configure(text=f"Parse error: {e}")
 
-    def update_board_ui(self):
-        for square in chess.SQUARES:
-            piece = self.board.piece_at(square)
-            label = self.squares[square]
-            if piece:
-                symbol = piece.symbol()
-                img = self.piece_images.get(symbol)
-                if img:
-                    label.configure(image=img, text="")
-                else:
-                    label.configure(image=self.empty_image, text=symbol) # Fallback
-            else:
-                label.configure(image=self.empty_image, text="")
+    # ─────────────────────────────────────────
+    #  BOARD REFRESH HELPERS
+    # ─────────────────────────────────────────
+    def _refresh_board_full(self):
+        """
+        Synchronise canvas visuals with self.chess_board state.
+        Performs a clean full redraw (squares + highlights + pieces).
+        """
+        self.board_canvas.chess_board = self.chess_board
+        self.board_canvas.full_redraw()
 
-    # --- Animation Logic ---
+    def _update_ui(self):
+        n  = len(self.moves)
+        mi = self.current_move_index
+        self.move_label.configure(text=f"Move  {mi} / {n}")
+        self.prev_btn.configure(state="normal" if mi > 0 else "disabled")
+        self.next_btn.configure(state="normal" if mi < n else "disabled")
+        self.start_btn.configure(state="normal" if mi > 0 else "disabled")
+        self.end_btn.configure(state="normal" if mi < n else "disabled")
 
-    def finish_animation(self):
-        if self.is_animating:
-            self.is_animating = False
-            if self.anim_job:
-                self.after_cancel(self.anim_job)
-                self.anim_job = None
-            if self.anim_label:
-                self.anim_label.destroy()
-                self.anim_label = None
-            self.finalize_move(self.pending_move, self.pending_undo)
+    # ─────────────────────────────────────────
+    #  NAVIGATION
+    # ─────────────────────────────────────────
+    def _goto_start(self):
+        """Jump to the initial position (no animation)."""
+        self._cancel_current_animation()
+        self.chess_board.reset()
+        self.current_move_index = 0
+        self.board_canvas.set_last_move(None, None)
+        self._refresh_board_full()
+        self._update_ui()
 
-    def finalize_move(self, move, is_undo):
+    def _goto_end(self):
+        """Jump to the final position (no animation)."""
+        self._cancel_current_animation()
+        self.chess_board.reset()
+        for move in self.moves:
+            self.chess_board.push(move)
+        self.current_move_index = len(self.moves)
+        if self.moves:
+            last = self.moves[-1]
+            self.board_canvas.set_last_move(last.from_square, last.to_square)
+        self._refresh_board_full()
+        self._update_ui()
+
+    def _next_move(self):
+        """Advance one move forward with animation."""
+        if self.current_move_index >= len(self.moves):
+            return
+        move = self.moves[self.current_move_index]
+        self._execute_animated_move(move, is_undo=False)
+
+    def _prev_move(self):
+        """Step one move backward with animation."""
+        if self.current_move_index <= 0:
+            return
+        move = self.moves[self.current_move_index - 1]
+        self._execute_animated_move(move, is_undo=True)
+
+    def _flip_board(self):
+        self._cancel_current_animation()
+        self.board_canvas.flip_board()
+
+    # ─────────────────────────────────────────
+    #  ANIMATION ORCHESTRATION
+    # ─────────────────────────────────────────
+    def _cancel_current_animation(self):
+        """
+        Debounce guard: if an animation is running, snap it to completion
+        and apply the board state changes instantly.
+        """
+        if self._animating:
+            self._animating = False
+            self.board_canvas._finish_animations_instantly()
+            # The on_complete callback will have been called by
+            # _finish_animations_instantly above; we just reset
+            self._pending_action = None
+
+    def _execute_animated_move(self, move: chess.Move, is_undo: bool):
+        """
+        Main entry point for a move animation.
+        Handles:
+          - Debounce of rapid button presses
+          - Castle detection (two simultaneous piece animations)
+          - Forward / backward direction
+        """
+        # If something is already in flight, snap it first
+        if self._animating:
+            self._cancel_current_animation()
+
+        self._animating = True
+
+        board    = self.chess_board
+        canvas   = self.board_canvas
+
         if is_undo:
-            self.board.pop()
-            self.current_move_index -= 1
-        else:
-            self.board.push(move)
-            self.current_move_index += 1
+            # For undo we want to move the piece from to_square back to from_square
+            moving_sq  = move.to_square
+            target_sq  = move.from_square
+            piece      = board.piece_at(moving_sq)
 
-        self.update_board_ui()
-        self.update_buttons()
-
-    def animate_move(self, move, is_undo=False):
-        if is_undo:
-            start_sq = move.to_square
-            end_sq = move.from_square
-            piece = self.board.piece_at(start_sq)
+            # Detect castling undo: the king is on g1/c1/g8/c8 for a castling move
+            is_castle = (
+                piece and piece.piece_type == chess.KING and
+                abs(chess.square_file(move.from_square) -
+                    chess.square_file(move.to_square)) == 2
+            )
         else:
-            start_sq = move.from_square
-            end_sq = move.to_square
-            piece = self.board.piece_at(start_sq)
+            moving_sq  = move.from_square
+            target_sq  = move.to_square
+            piece      = board.piece_at(moving_sq)
+
+            is_castle = (
+                piece and piece.piece_type == chess.KING and
+                abs(chess.square_file(move.from_square) -
+                    chess.square_file(move.to_square)) == 2
+            )
 
         if not piece:
-            # Fallback if somehow there's no piece
-            self.finalize_move(move, is_undo)
+            # Fallback: no piece found, apply instantly
+            self._apply_move(move, is_undo)
+            self._animating = False
+            self._update_ui()
             return
 
-        start_lbl = self.squares[start_sq]
-        end_lbl = self.squares[end_sq]
+        # ── Build moves_data list ─────────────
+        moves_data = []
+
+        # Primary piece
+        item = canvas.piece_items.get(moving_sq)
+        if item is not None:
+            moves_data.append({
+                "item":     item,
+                "start_sq": moving_sq,
+                "end_sq":   target_sq,
+            })
         
-        self.update() # Ensure geometry is fresh
-        start_x, start_y = start_lbl.winfo_x(), start_lbl.winfo_y()
-        end_x, end_y = end_lbl.winfo_x(), end_lbl.winfo_y()
-
-        # If window is minimized or not drawn properly, fallback
-        if start_x == 0 and start_y == 0 and end_x == 0 and end_y == 0:
-            self.finalize_move(move, is_undo)
-            return
-
-        self.is_animating = True
-        self.pending_move = move
-        self.pending_undo = is_undo
-
-        img = self.piece_images.get(piece.symbol())
-        start_lbl.configure(image=None) # Hide piece from start label
-
-        w = start_lbl.winfo_width()
-        h = start_lbl.winfo_height()
-
-        self.anim_label = ctk.CTkLabel(self.board_container, text="", image=img, width=w, height=h)
-        self.anim_label.place(x=start_x, y=start_y)
-        self.anim_label.lift() # Ensure it's on top of everything
-
-        # Calculate distance to make duration dynamic but fast
-        dist = math.hypot(end_x - start_x, end_y - start_y)
-        # Base 60ms + up to 60ms extra for long moves (max ~120ms)
-        duration = 0.06 + (dist / 800) * 0.06 
-        start_time = time.time()
-        
-        def anim_step():
-            if not self.is_animating:
-                return # Was cancelled
-            
-            now = time.time()
-            t = (now - start_time) / duration
-            if t > 1.0:
-                t = 1.0
-                
-            # Sine Ease-Out: very snappy start, soft landing
-            eased_t = math.sin((t * math.pi) / 2)
-            
-            curr_x = start_x + (end_x - start_x) * eased_t
-            curr_y = start_y + (end_y - start_y) * eased_t
-            
-            self.anim_label.place(x=int(curr_x), y=int(curr_y))
-            
-            if t < 1.0:
-                # 1ms delay asks Tkinter to run as fast as the OS event loop allows
-                self.anim_job = self.after(1, anim_step)
+        # ── Castling companion (rook) ─────────
+        if is_castle:
+            rank = chess.square_rank(move.from_square)
+            if not is_undo:
+                # Determine rook positions for forward castle
+                king_to_file = chess.square_file(move.to_square)
+                if king_to_file == 6:  # kingside
+                    rook_from = chess.square(7, rank)
+                    rook_to   = chess.square(5, rank)
+                else:                   # queenside
+                    rook_from = chess.square(0, rank)
+                    rook_to   = chess.square(3, rank)
             else:
-                self.finish_animation()
+                # Undo: rook is on f1/d1 or f8/d8, move it back
+                king_orig_file = chess.square_file(move.from_square)
+                king_dest_file = chess.square_file(move.to_square)
+                if king_dest_file > king_orig_file:  # was kingside
+                    rook_from = chess.square(5, rank)
+                    rook_to   = chess.square(7, rank)
+                else:                                  # was queenside
+                    rook_from = chess.square(3, rank)
+                    rook_to   = chess.square(0, rank)
 
-        anim_step()
+            rook_item = canvas.piece_items.get(rook_from)
+            if rook_item is not None:
+                moves_data.append({
+                    "item":     rook_item,
+                    "start_sq": rook_from,
+                    "end_sq":   rook_to,
+                })
 
-    # --- Move Controls ---
+        if not moves_data:
+            # Nothing to animate, apply instantly
+            self._apply_move(move, is_undo)
+            self._animating = False
+            self._update_ui()
+            return
 
-    def next_move(self):
-        self.finish_animation()
-        if self.current_move_index < len(self.moves):
-            move = self.moves[self.current_move_index]
-            self.animate_move(move, is_undo=False)
+        # ── Hide captured piece early (visual only) ──
+        if not is_undo:
+            captured = board.piece_at(target_sq)
+            if captured:
+                cap_item = canvas.piece_items.get(target_sq)
+                if cap_item:
+                    canvas.delete(cap_item)
+                    del canvas.piece_items[target_sq]
 
-    def prev_move(self):
-        self.finish_animation()
-        if self.current_move_index > 0:
-            move = self.moves[self.current_move_index - 1]
-            self.animate_move(move, is_undo=True)
+        def on_animation_done():
+            """Called after all pieces in this batch have reached their destinations."""
+            self._apply_move(move, is_undo)
+            self._animating = False
+            self._update_ui()
 
-    def update_buttons(self):
-        self.prev_btn.configure(state="normal" if self.current_move_index > 0 else "disabled")
-        self.next_btn.configure(state="normal" if self.current_move_index < len(self.moves) else "disabled")
-        self.info_label.configure(text=f"Move {self.current_move_index} / {len(self.moves)}")
+        canvas.animate_pieces(moves_data, on_animation_done)
 
+    def _apply_move(self, move: chess.Move, is_undo: bool):
+        """
+        Commit the board state change and refresh the canvas.
+        This is called after the animation completes.
+        """
+        if is_undo:
+            self.chess_board.pop()
+            self.current_move_index -= 1
+            # Determine last-move highlight for the new current position
+            if self.current_move_index > 0:
+                prev = self.moves[self.current_move_index - 1]
+                self.board_canvas.set_last_move(prev.from_square, prev.to_square)
+            else:
+                self.board_canvas.set_last_move(None, None)
+        else:
+            self.chess_board.push(move)
+            self.current_move_index += 1
+            self.board_canvas.set_last_move(move.from_square, move.to_square)
+
+        # Full sync of canvas piece items to board state
+        self.board_canvas.chess_board = self.chess_board
+        self._resync_pieces()
+
+    def _resync_pieces(self):
+        """
+        Efficiently sync canvas piece items with the current board state
+        WITHOUT a full redraw (avoids flickering).
+        We recalculate what *should* be on each square and update deltas.
+        """
+        canvas   = self.board_canvas
+        board    = self.chess_board
+
+        # Remove all existing piece items
+        for item in list(canvas.piece_items.values()):
+            canvas.delete(item)
+        canvas.piece_items.clear()
+
+        # Redraw pieces cleanly
+        canvas._draw_pieces()
+        # Ensure highlights stay under pieces
+        canvas.tag_raise("piece")
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  ENTRY POINT
+# ═══════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    ctk.set_appearance_mode("Dark")
-    ctk.set_default_color_theme("blue")
     app = PGNViewerApp()
     app.mainloop()

@@ -3,11 +3,14 @@
 A sleek, modern Python desktop application built with `customtkinter` for viewing chess PGNs and static FEN positions. It features a beautifully themed digital chessboard, smooth Lichess-style piece animations, and automatic game metadata extraction.
 
 ## Features
-- **Dynamic Board Themes**: Switch instantly between Classic Wood, Ocean Blue, Lichess Green, and Dark Mode.
-- **High-Resolution Graphics**: Automatically downloads and utilizes the crisp "Alpha" chess piece set.
-- **Fluid Animations**: Pieces glide naturally across the board with ultra-smooth cubic-ease easing functions.
-- **Game Metadata**: Automatically parses and displays Player Names, ELO Ratings, Event/Site information, and Final Outcome from PGN headers.
-- **File Browsing & FEN Support**: Easily browse your computer for `.pgn` files or paste a static FEN string to instantly load a position.
+- **Unified Canvas Architecture**: The entire board, coordinates, highlights, and pieces are rendered on a single high-performance `tkinter.Canvas`, eliminating performance hiccups, widget-spacing bugs, and image ghosting.
+- **Buttery-Smooth Animations**: Pieces glide naturally with a dynamic cubic ease-out (`1 - (1-t)^3`) engine. Move durations scale dynamically between 120ms and 200ms depending on the distance traveled.
+- **Advanced Navigation & Debouncing**: Features a debounced animation pipeline. If you click "Next" or "Previous" rapidly, current animations instantly snap to completion so you never get visual desyncs.
+- **Simultaneous Castling Animations**: Both the King and Rook animate at the same time during castling!
+- **Dynamic Resizing**: Features automatic on-the-fly piece rescaling using PIL `LANCZOS` filters whenever the window is resized, maintaining crystal-sharp visuals.
+- **Multiple Piece Styles**: Switch instantly between **Alpha**, **Cburnett** (Lichess default), **Maestro**, and **California** piece packs, which download automatically in a background thread upon selection.
+- **Lichess-Accurate Themes**: Choose between beautifully rendered board themes complete with semi-transparent last-move highlight overlays and square-selection outline rings.
+- **File Browsing & FEN Support**: Easily browse your local files for `.pgn` files or paste a static FEN string to set up custom positions instantly.
 
 ## Requirements
 - Python 3.x
