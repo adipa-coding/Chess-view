@@ -1,0 +1,13 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.env
+
+# Downloaded piece assets
+pieces_alpha/
+pieces/
