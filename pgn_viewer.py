@@ -999,7 +999,63 @@ class PGNViewerApp(ctk.CTk):
             self.matchup_label.configure(text=f"♔ {white}{elo_w}  vs  ♚ {black}{elo_b}")
             ev_str = " · ".join(x for x in [event, site] if x)
             self.event_label.configure(text=ev_str or "—")
-            res_str = f"Result: {result}" + (f"  —  {term}" if term else "")
+            
+            # Beautiful dynamic game outcome parser
+            def parse_outcome(res, trm, mvs):
+                if res == "1-0":
+                    winner_color = "White"
+                elif res == "0-1":
+                    winner_color = "Black"
+                elif res == "1/2-1/2":
+                    winner_color = "Draw"
+                else:
+                    return "⚔️ Game in Progress"
+
+                reason = ""
+                t_lower = trm.lower() if trm else ""
+                
+                # Check for standard termination keywords
+                if "checkmate" in t_lower:
+                    reason = "by checkmate"
+                elif "resignation" in t_lower:
+                    reason = "by resignation"
+                elif "on time" in t_lower or "time" in t_lower:
+                    reason = "on time"
+                elif "stalemate" in t_lower:
+                    reason = "by stalemate"
+                elif "insufficient" in t_lower:
+                    reason = "due to insufficient material"
+                elif "agreement" in t_lower:
+                    reason = "by agreement"
+                elif "abandoned" in t_lower:
+                    reason = "by abandonment"
+                elif trm:
+                    cleaned_trm = trm.replace("Game drawn by ", "").replace("won by ", "").replace("won on ", "")
+                    reason = f"({cleaned_trm})"
+
+                # Fallback: simulate final board state if no explicit termination detail is present
+                if not reason and mvs:
+                    try:
+                        temp_board = chess.Board()
+                        for m in mvs:
+                            temp_board.push(m)
+                        if temp_board.is_checkmate():
+                            reason = "by checkmate"
+                        elif temp_board.is_stalemate():
+                            reason = "by stalemate"
+                        elif temp_board.is_insufficient_material():
+                            reason = "due to insufficient material"
+                        elif temp_board.is_seventyfive_moves() or temp_board.is_fivefold_repetition():
+                            reason = "by repetition"
+                    except:
+                        pass
+
+                if winner_color == "Draw":
+                    return f"🤝 Draw {reason}".strip() + " (½-½)"
+                else:
+                    return f"🏆 {winner_color} won {reason}".strip() + f" ({res})"
+
+            res_str = parse_outcome(result, term, self.moves)
             self.result_label.configure(text=res_str)
             self.status_label.configure(text=f"Loaded {len(self.moves)} moves ✔")
 
