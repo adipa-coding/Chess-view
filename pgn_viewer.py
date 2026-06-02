@@ -655,7 +655,8 @@ class PGNViewerApp(ctk.CTk):
         # ── Game state ───────────────────────
         self.chess_board        = chess.Board()
         self.moves: list[chess.Move] = []
-        self.moves_info: list[dict] = []
+        self.game: chess.pgn.Game | None = None
+        self.current_node: chess.pgn.GameNode | None = None
         self.current_move_index = 0
 
         # ── Asset state ──────────────────────
@@ -983,7 +984,8 @@ class PGNViewerApp(ctk.CTk):
             try:
                 self.chess_board.set_fen(text.strip())
                 self.moves = []
-                self.moves_info = []
+                self.game = None
+                self.current_node = None
                 self.current_move_index = 0
                 self.matchup_label.configure(text="Static FEN Position")
                 self.event_label.configure(text="Custom Board Setup")
@@ -1002,33 +1004,11 @@ class PGNViewerApp(ctk.CTk):
                 self.status_label.configure(text="Could not parse PGN.")
                 return
 
-            self.moves = []
-            self.moves_info = []
-            
-            node = game
-            while not node.is_end():
-                next_node = node.next()
-                move = next_node.move
-                comment = next_node.comment.strip()
-                san = next_node.san()
-                
-                curr_board = node.board()
-                turn = "White" if curr_board.turn == chess.WHITE else "Black"
-                move_num = curr_board.fullmove_number
-                
-                self.moves.append(move)
-                self.moves_info.append({
-                    "move": move,
-                    "comment": comment,
-                    "san": san,
-                    "turn": turn,
-                    "move_number": move_num
-                })
-                
-                node = next_node
+            self.game = game
+            self.current_node = game
+            self._rebuild_active_path()
 
             self.chess_board.reset()
-            self.current_move_index = 0
 
             # Metadata
             white = game.headers.get("White", "?")
@@ -1117,6 +1097,37 @@ class PGNViewerApp(ctk.CTk):
     # ─────────────────────────────────────────
     #  BOARD REFRESH HELPERS
     # ─────────────────────────────────────────
+    def _rebuild_active_path(self):
+        """
+        Reconstruct self.moves list and determine self.current_move_index
+        based on the active path from the root of self.game, passing through self.current_node,
+        and continuing along the default variations (variations[0]) to the end.
+        """
+        if not self.game:
+            self.moves = []
+            self.current_move_index = 0
+            return
+
+        # 1. Walk backward from self.current_node to the root self.game to get the history
+        history_nodes = []
+        node = self.current_node
+        while node is not None and node != self.game:
+            history_nodes.append(node)
+            node = node.parent
+        history_nodes.reverse()
+
+        # 2. Walk forward from self.current_node along the default mainline to the end
+        forward_nodes = []
+        node = self.current_node
+        while not node.is_end():
+            node = node.variations[0]
+            forward_nodes.append(node)
+
+        # Combine them to get the complete active path
+        all_nodes = history_nodes + forward_nodes
+        self.moves = [n.move for n in all_nodes]
+        self.current_move_index = len(history_nodes)
+
     def _refresh_board_full(self):
         """
         Synchronise canvas visuals with self.chess_board state.
@@ -1136,8 +1147,20 @@ class PGNViewerApp(ctk.CTk):
         self._update_comment_panel()
 
     def _update_comment_panel(self):
-        mi = self.current_move_index
-        if not self.moves_info:
+        # Clear variation buttons first
+        for widget in getattr(self, "_var_buttons", []):
+            try:
+                widget.destroy()
+            except:
+                pass
+        self._var_buttons = []
+
+        if not hasattr(self, "var_container"):
+            # Create a clean subframe inside the comment frame
+            self.var_container = ctk.CTkFrame(self.comment_frame, fg_color="transparent")
+            self.var_container.pack(fill="x", padx=10, pady=(0, 10))
+
+        if not self.game:
             if self.chess_board:
                 turn = "White" if self.chess_board.turn == chess.WHITE else "Black"
                 icon = "⚪" if turn == "White" else "⚫"
@@ -1152,19 +1175,22 @@ class PGNViewerApp(ctk.CTk):
                 )
             return
 
-        if mi == 0:
+        if self.current_node == self.game:
             self.comment_detail_label.configure(
                 text="🎬 Game Start\n\n⚪ White to move",
                 text_color="#e0d0b0"
             )
+            choices = self.current_node.variations
+            self._draw_variation_buttons(choices)
             return
 
-        # Get last played move info
-        info = self.moves_info[mi - 1]
-        move_num = info["move_number"]
-        san = info["san"]
-        turn = info["turn"]
-        comment = info["comment"]
+        # Get parent board and current move info
+        parent_node = self.current_node.parent
+        curr_board = parent_node.board()
+        move_num = curr_board.fullmove_number
+        san = self.current_node.san()
+        turn = "White" if curr_board.turn == chess.WHITE else "Black"
+        comment = self.current_node.comment.strip()
 
         # Next player's turn to move
         next_turn = "Black" if turn == "White" else "White"
@@ -1174,12 +1200,56 @@ class PGNViewerApp(ctk.CTk):
         outcome_text += f"{next_icon} Next: {next_turn} to move\n\n"
 
         if comment:
-            # Wrap at 34 chars to look beautifully structured in the card
             outcome_text += f"💬 Comment:\n\"{comment}\""
             self.comment_detail_label.configure(text=outcome_text, text_color="#e8d5a3")
         else:
             outcome_text += "💬 Comment:\n(No comment on this move)"
             self.comment_detail_label.configure(text=outcome_text, text_color="#a0a0b0")
+
+        # Draw variation buttons for choices branching from this node
+        choices = self.current_node.variations
+        self._draw_variation_buttons(choices)
+
+    def _draw_variation_buttons(self, choices):
+        if len(choices) > 1:
+            lbl = ctk.CTkLabel(
+                self.var_container, text="🔀 Alternatives:",
+                font=("Segoe UI", 11, "bold"),
+                text_color="#c8b88a"
+            )
+            lbl.pack(anchor="w", pady=(6, 2))
+            self._var_buttons.append(lbl)
+            
+            for i, v in enumerate(choices):
+                san = v.san()
+                # Create a closure
+                def make_handler(node_to_play):
+                    return lambda: self._play_variation(node_to_play)
+                
+                if i == 0:
+                    btn_color = "#1e3050"
+                    hover = "#2a4070"
+                    prefix = "★ "
+                else:
+                    btn_color = "#2b2b4a"
+                    hover = "#3b3b6a"
+                    prefix = "↳ "
+                
+                btn = ctk.CTkButton(
+                    self.var_container,
+                    text=f"{prefix}{san}",
+                    command=make_handler(v),
+                    font=("Segoe UI", 11),
+                    height=24,
+                    fg_color=btn_color,
+                    hover_color=hover,
+                    corner_radius=6
+                )
+                btn.pack(fill="x", pady=2)
+                self._var_buttons.append(btn)
+
+    def _play_variation(self, node_to_play):
+        self._execute_animated_move(node_to_play.move, is_undo=False)
 
     # ─────────────────────────────────────────
     #  NAVIGATION
@@ -1188,7 +1258,11 @@ class PGNViewerApp(ctk.CTk):
         """Jump to the initial position (no animation)."""
         self._cancel_current_animation()
         self.chess_board.reset()
-        self.current_move_index = 0
+        if self.game:
+            self.current_node = self.game
+            self._rebuild_active_path()
+        else:
+            self.current_move_index = 0
         self.board_canvas.set_last_move(None, None)
         self._refresh_board_full()
         self._update_ui()
@@ -1196,13 +1270,22 @@ class PGNViewerApp(ctk.CTk):
     def _goto_end(self):
         """Jump to the final position (no animation)."""
         self._cancel_current_animation()
-        self.chess_board.reset()
-        for move in self.moves:
-            self.chess_board.push(move)
-        self.current_move_index = len(self.moves)
+        if self.game and self.current_node:
+            while not self.current_node.is_end():
+                self.current_node = self.current_node.variations[0]
+            self._rebuild_active_path()
+            self.chess_board = self.current_node.board()
+        else:
+            self.chess_board.reset()
+            for move in self.moves:
+                self.chess_board.push(move)
+            self.current_move_index = len(self.moves)
+            
         if self.moves:
             last = self.moves[-1]
             self.board_canvas.set_last_move(last.from_square, last.to_square)
+        else:
+            self.board_canvas.set_last_move(None, None)
         self._refresh_board_full()
         self._update_ui()
 
@@ -1360,8 +1443,10 @@ class PGNViewerApp(ctk.CTk):
         """
         if is_undo:
             self.chess_board.pop()
-            self.current_move_index -= 1
-            # Determine last-move highlight for the new current position
+            if self.current_node and self.current_node.parent:
+                self.current_node = self.current_node.parent
+            self._rebuild_active_path()
+            
             if self.current_move_index > 0:
                 prev = self.moves[self.current_move_index - 1]
                 self.board_canvas.set_last_move(prev.from_square, prev.to_square)
@@ -1369,7 +1454,16 @@ class PGNViewerApp(ctk.CTk):
                 self.board_canvas.set_last_move(None, None)
         else:
             self.chess_board.push(move)
-            self.current_move_index += 1
+            if self.current_node:
+                matching_child = None
+                for v in self.current_node.variations:
+                    if v.move == move:
+                        matching_child = v
+                        break
+                if matching_child:
+                    self.current_node = matching_child
+            
+            self._rebuild_active_path()
             self.board_canvas.set_last_move(move.from_square, move.to_square)
 
         # Full sync of canvas piece items to board state
