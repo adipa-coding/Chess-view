@@ -655,6 +655,7 @@ class PGNViewerApp(ctk.CTk):
         # ── Game state ───────────────────────
         self.chess_board        = chess.Board()
         self.moves: list[chess.Move] = []
+        self.moves_info: list[dict] = []
         self.current_move_index = 0
 
         # ── Asset state ──────────────────────
@@ -789,6 +790,26 @@ class PGNViewerApp(ctk.CTk):
             border_color="#3a5a3a", border_width=1
         )
         self.flip_btn.grid(row=row, column=0, padx=10, pady=(4, 10), sticky="ew"); row += 1
+
+        # ── Move Analysis / Comments Panel ──
+        self.comment_frame = ctk.CTkFrame(parent, fg_color="#181830", corner_radius=10, border_color="#2a2a50", border_width=1)
+        self.comment_frame.grid(row=row, column=0, padx=10, pady=10, sticky="ew"); row += 1
+        
+        self.comment_header = ctk.CTkLabel(
+            self.comment_frame, text="📝 Move Analysis",
+            font=("Segoe UI", 12, "bold"),
+            text_color="#c8b88a"
+        )
+        self.comment_header.pack(anchor="w", padx=10, pady=(8, 2))
+        
+        self.comment_detail_label = ctk.CTkLabel(
+            self.comment_frame, text="Load a PGN to see comments.",
+            font=("Segoe UI", 11, "italic"),
+            text_color="#8a8a9a",
+            wraplength=250,
+            justify="left"
+        )
+        self.comment_detail_label.pack(anchor="w", padx=10, pady=(2, 10))
 
         sep3 = ctk.CTkFrame(parent, height=1, fg_color="#2a2a4a")
         sep3.grid(row=row, column=0, sticky="ew", padx=10, pady=6); row += 1
@@ -962,6 +983,7 @@ class PGNViewerApp(ctk.CTk):
             try:
                 self.chess_board.set_fen(text.strip())
                 self.moves = []
+                self.moves_info = []
                 self.current_move_index = 0
                 self.matchup_label.configure(text="Static FEN Position")
                 self.event_label.configure(text="Custom Board Setup")
@@ -980,7 +1002,31 @@ class PGNViewerApp(ctk.CTk):
                 self.status_label.configure(text="Could not parse PGN.")
                 return
 
-            self.moves = list(game.mainline_moves())
+            self.moves = []
+            self.moves_info = []
+            
+            node = game
+            while not node.is_end():
+                next_node = node.next()
+                move = next_node.move
+                comment = next_node.comment.strip()
+                san = next_node.san()
+                
+                curr_board = node.board()
+                turn = "White" if curr_board.turn == chess.WHITE else "Black"
+                move_num = curr_board.fullmove_number
+                
+                self.moves.append(move)
+                self.moves_info.append({
+                    "move": move,
+                    "comment": comment,
+                    "san": san,
+                    "turn": turn,
+                    "move_number": move_num
+                })
+                
+                node = next_node
+
             self.chess_board.reset()
             self.current_move_index = 0
 
@@ -1087,6 +1133,53 @@ class PGNViewerApp(ctk.CTk):
         self.next_btn.configure(state="normal" if mi < n else "disabled")
         self.start_btn.configure(state="normal" if mi > 0 else "disabled")
         self.end_btn.configure(state="normal" if mi < n else "disabled")
+        self._update_comment_panel()
+
+    def _update_comment_panel(self):
+        mi = self.current_move_index
+        if not self.moves_info:
+            if self.chess_board:
+                turn = "White" if self.chess_board.turn == chess.WHITE else "Black"
+                icon = "⚪" if turn == "White" else "⚫"
+                self.comment_detail_label.configure(
+                    text=f"⚙️ Static Position\n\n{icon} {turn} to move",
+                    text_color="#e0d0b0"
+                )
+            else:
+                self.comment_detail_label.configure(
+                    text="Load a PGN game to see comments and move analysis.",
+                    text_color="#8a8a9a"
+                )
+            return
+
+        if mi == 0:
+            self.comment_detail_label.configure(
+                text="🎬 Game Start\n\n⚪ White to move",
+                text_color="#e0d0b0"
+            )
+            return
+
+        # Get last played move info
+        info = self.moves_info[mi - 1]
+        move_num = info["move_number"]
+        san = info["san"]
+        turn = info["turn"]
+        comment = info["comment"]
+
+        # Next player's turn to move
+        next_turn = "Black" if turn == "White" else "White"
+        next_icon = "⚫" if next_turn == "Black" else "⚪"
+
+        outcome_text = f"♟️ Move {move_num}: {san} ({turn})\n"
+        outcome_text += f"{next_icon} Next: {next_turn} to move\n\n"
+
+        if comment:
+            # Wrap at 34 chars to look beautifully structured in the card
+            outcome_text += f"💬 Comment:\n\"{comment}\""
+            self.comment_detail_label.configure(text=outcome_text, text_color="#e8d5a3")
+        else:
+            outcome_text += "💬 Comment:\n(No comment on this move)"
+            self.comment_detail_label.configure(text=outcome_text, text_color="#a0a0b0")
 
     # ─────────────────────────────────────────
     #  NAVIGATION
