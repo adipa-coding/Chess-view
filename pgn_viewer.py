@@ -5,6 +5,7 @@ import os
 import urllib.request
 import io
 import time
+import math
 from PIL import Image
 
 # Piece URL mapping (Alpha style)
@@ -346,7 +347,10 @@ class PGNViewerApp(ctk.CTk):
         self.anim_label.place(x=start_x, y=start_y)
         self.anim_label.lift() # Ensure it's on top of everything
 
-        duration = 0.15 # 150ms for Lichess-style snappy animation
+        # Calculate distance to make duration dynamic but fast
+        dist = math.hypot(end_x - start_x, end_y - start_y)
+        # Base 60ms + up to 60ms extra for long moves (max ~120ms)
+        duration = 0.06 + (dist / 800) * 0.06 
         start_time = time.time()
         
         def anim_step():
@@ -358,8 +362,8 @@ class PGNViewerApp(ctk.CTk):
             if t > 1.0:
                 t = 1.0
                 
-            # Ease out cubic function for ultra-smooth stopping
-            eased_t = 1 - pow(1 - t, 3)
+            # Sine Ease-Out: very snappy start, soft landing
+            eased_t = math.sin((t * math.pi) / 2)
             
             curr_x = start_x + (end_x - start_x) * eased_t
             curr_y = start_y + (end_y - start_y) * eased_t
@@ -367,7 +371,8 @@ class PGNViewerApp(ctk.CTk):
             self.anim_label.place(x=int(curr_x), y=int(curr_y))
             
             if t < 1.0:
-                self.anim_job = self.after(10, anim_step)
+                # 1ms delay asks Tkinter to run as fast as the OS event loop allows
+                self.anim_job = self.after(1, anim_step)
             else:
                 self.finish_animation()
 
