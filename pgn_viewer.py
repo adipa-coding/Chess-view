@@ -44,36 +44,35 @@ PIECE_PACKS = {
         },
         "folder": "pieces_alpha",
     },
-    "Cburnett": {
-        # Lichess default SVG-rasterised set (PNG mirrors on GitHub)
-        "base_url": "https://raw.githubusercontent.com/lichess-org/lila/master/public/piece/cburnett/",
+    "Merida": {
+        "base_url": "https://raw.githubusercontent.com/oakmac/chessboardjs/master/website/img/chesspieces/merida/",
         "files": {
             "P": "wP.png", "N": "wN.png", "B": "wB.png",
             "R": "wR.png", "Q": "wQ.png", "K": "wK.png",
             "p": "bP.png", "n": "bN.png", "b": "bB.png",
             "r": "bR.png", "q": "bQ.png", "k": "bK.png",
         },
-        "folder": "pieces_cburnett",
+        "folder": "pieces_merida",
     },
-    "Maestro": {
-        "base_url": "https://raw.githubusercontent.com/lichess-org/lila/master/public/piece/maestro/",
+    "Leipzig": {
+        "base_url": "https://raw.githubusercontent.com/oakmac/chessboardjs/master/website/img/chesspieces/leipzig/",
         "files": {
             "P": "wP.png", "N": "wN.png", "B": "wB.png",
             "R": "wR.png", "Q": "wQ.png", "K": "wK.png",
             "p": "bP.png", "n": "bN.png", "b": "bB.png",
             "r": "bR.png", "q": "bQ.png", "k": "bK.png",
         },
-        "folder": "pieces_maestro",
+        "folder": "pieces_leipzig",
     },
-    "California": {
-        "base_url": "https://raw.githubusercontent.com/lichess-org/lila/master/public/piece/california/",
+    "Wikipedia": {
+        "base_url": "https://raw.githubusercontent.com/oakmac/chessboardjs/master/website/img/chesspieces/wikipedia/",
         "files": {
             "P": "wP.png", "N": "wN.png", "B": "wB.png",
             "R": "wR.png", "Q": "wQ.png", "K": "wK.png",
             "p": "bP.png", "n": "bN.png", "b": "bB.png",
             "r": "bR.png", "q": "bQ.png", "k": "bK.png",
         },
-        "folder": "pieces_california",
+        "folder": "pieces_wikipedia",
     },
 }
 
@@ -657,6 +656,7 @@ class PGNViewerApp(ctk.CTk):
         self.moves: list[chess.Move] = []
         self.game: chess.pgn.Game | None = None
         self.current_node: chess.pgn.GameNode | None = None
+        self.main_game_nodes: set = set()
         self.current_move_index = 0
 
         # ── Asset state ──────────────────────
@@ -986,6 +986,7 @@ class PGNViewerApp(ctk.CTk):
                 self.moves = []
                 self.game = None
                 self.current_node = None
+                self.main_game_nodes = set()
                 self.current_move_index = 0
                 self.matchup_label.configure(text="Static FEN Position")
                 self.event_label.configure(text="Custom Board Setup")
@@ -1006,8 +1007,17 @@ class PGNViewerApp(ctk.CTk):
 
             self.game = game
             self.current_node = game
-            self._rebuild_active_path()
+            
+            # Trace and store all nodes that belong to the Main Game Line (played line)
+            self.main_game_nodes = set()
+            node = game
+            while node is not None:
+                self.main_game_nodes.add(node)
+                if node.is_end():
+                    break
+                node = node.variations[0]
 
+            self._rebuild_active_path()
             self.chess_board.reset()
 
             # Metadata
@@ -1226,14 +1236,16 @@ class PGNViewerApp(ctk.CTk):
                 def make_handler(node_to_play):
                     return lambda: self._play_variation(node_to_play)
                 
-                if i == 0:
-                    btn_color = "#1e3050"
-                    hover = "#2a4070"
-                    prefix = "★ "
+                is_played = v in getattr(self, "main_game_nodes", set())
+                
+                if is_played:
+                    btn_color = "#1e3d25"      # forest green for played line
+                    hover = "#285c34"
+                    prefix = "★ Played Line: "
                 else:
-                    btn_color = "#2b2b4a"
+                    btn_color = "#2b2b4a"      # dark indigo for analysis sub-lines
                     hover = "#3b3b6a"
-                    prefix = "↳ "
+                    prefix = "↳ Sub-line: "
                 
                 btn = ctk.CTkButton(
                     self.var_container,
