@@ -938,14 +938,26 @@ class PGNViewerApp(ctk.CTk):
         self.end_btn = ctk.CTkButton(nav_frame, text="⏭", command=self._goto_end, width=44, **btn_style)
         self.end_btn.grid(row=0, column=3, padx=3)
 
-        # Flip board
+        # Action row (Flip & Analyze)
+        action_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        action_frame.grid(row=row, column=0, padx=10, pady=(4, 10), sticky="ew"); row += 1
+        action_frame.grid_columnconfigure((0, 1), weight=1)
+
         self.flip_btn = ctk.CTkButton(
-            parent, text="⇅  Flip Board", command=self._flip_board,
+            action_frame, text="⇅  Flip Board", command=self._flip_board,
             font=("Segoe UI", 12), corner_radius=8, height=32,
             fg_color="#1a2a1a", hover_color="#2a4a2a",
             border_color="#3a5a3a", border_width=1
         )
-        self.flip_btn.grid(row=row, column=0, padx=10, pady=(4, 10), sticky="ew"); row += 1
+        self.flip_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+
+        self.analyze_btn = ctk.CTkButton(
+            action_frame, text="🔬 Analyze", command=self._analyze_position,
+            font=("Segoe UI", 12), corner_radius=8, height=32,
+            fg_color="#3a1e50", hover_color="#5a2a70",
+            border_color="#5a3a70", border_width=1
+        )
+        self.analyze_btn.grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
         # ── Move Analysis / Comments Panel ──
         self.comment_frame = ctk.CTkFrame(parent, fg_color="#181830", corner_radius=10, border_color="#2a2a50", border_width=1)
@@ -1483,6 +1495,15 @@ class PGNViewerApp(ctk.CTk):
     def _flip_board(self):
         self._cancel_current_animation()
         self.board_canvas.flip_board()
+
+    def _analyze_position(self):
+        messagebox.showinfo(
+            "Analyze Position",
+            "Stockfish Engine Analysis is currently under development!\n\n"
+            "This coming-soon feature will allow you to run real-time local Stockfish analysis "
+            "directly on the current board position, complete with evaluation scores and "
+            "best-move recommendations."
+        )
 
     # ─────────────────────────────────────────
     #  ANIMATION ORCHESTRATION

@@ -13,6 +13,7 @@ A sleek, modern Python desktop application built with `customtkinter` for viewin
 - **File Browsing & FEN Support**: Easily browse your local files for `.pgn` files or paste a static FEN string to set up custom positions instantly.
 - **PGN Comment Sanitization**: Cleans metadata and technical command strings (e.g. `[%eval]`, `[%clk]`, `[%c_effect]`, `[%arrow]`, `[%cal]`) from PGN comments, formatting evaluations and clock times beautifully in the move analysis panel.
 - **NAG Notation Support**: Maps Numeric Annotation Glyphs (NAGs) like `!!`, `!?`, `?`, or `??` to their readable chess symbol suffixes for moves.
+- **Engine Analysis (Coming Soon)**: A dedicated button to run real-time local Stockfish engine evaluations and best-move recommendations directly on the current board position.
 
 ## Requirements
 - Python 3.x
