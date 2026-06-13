@@ -8,9 +8,11 @@ A sleek, modern Python desktop application built with `customtkinter` for viewin
 - **Advanced Navigation & Debouncing**: Features a debounced animation pipeline. If you click "Next" or "Previous" rapidly, current animations instantly snap to completion so you never get visual desyncs.
 - **Simultaneous Castling Animations**: Both the King and Rook animate at the same time during castling!
 - **Dynamic Resizing**: Features automatic on-the-fly piece rescaling using PIL `LANCZOS` filters whenever the window is resized, maintaining crystal-sharp visuals.
-- **Multiple Piece Styles**: Switch instantly between **Alpha**, **Cburnett** (Lichess default), **Maestro**, and **California** piece packs, which download automatically in a background thread upon selection.
+- **Multiple Piece Styles**: Switch instantly between **Alpha**, **Merida**, **Leipzig**, and **Wikipedia** piece packs, which download automatically in a background thread upon selection.
 - **Lichess-Accurate Themes**: Choose between beautifully rendered board themes complete with semi-transparent last-move highlight overlays and square-selection outline rings.
 - **File Browsing & FEN Support**: Easily browse your local files for `.pgn` files or paste a static FEN string to set up custom positions instantly.
+- **PGN Comment Sanitization**: Cleans metadata and technical command strings (e.g. `[%eval]`, `[%clk]`, `[%c_effect]`, `[%arrow]`, `[%cal]`) from PGN comments, formatting evaluations and clock times beautifully in the move analysis panel.
+- **NAG Notation Support**: Maps Numeric Annotation Glyphs (NAGs) like `!!`, `!?`, `?`, or `??` to their readable chess symbol suffixes for moves.
 
 ## Requirements
 - Python 3.x
