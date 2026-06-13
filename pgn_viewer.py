@@ -26,6 +26,7 @@ import time
 import math
 import threading
 import urllib.request
+import re
 from PIL import Image, ImageTk, ImageDraw, ImageFilter
 
 # ──────────────────────────────────────────────
@@ -641,6 +642,160 @@ class PGNViewerApp(ctk.CTk):
     WINDOW_W = 1080
     WINDOW_H = 780
 
+    NAG_SYMBOLS: dict[int, str] = {
+        1:  "!",        # Good move
+        2:  "?",        # Mistake
+        3:  "!!",       # Brilliant move
+        4:  "??",       # Blunder
+        5:  "!?",       # Interesting / speculative
+        6:  "?!",       # Dubious / inaccuracy
+        7:  "□",        # Forced move
+        10: "=",        # Equal position
+        13: "∞",        # Unclear position
+        14: "⩲",        # Slight advantage White
+        15: "⩱",        # Slight advantage Black
+        16: "±",        # Clear advantage White
+        17: "∓",        # Clear advantage Black
+        18: "+−",       # Decisive advantage White
+        19: "−+",       # Decisive advantage Black
+        22: "⊘",        # Zugzwang White
+        23: "⊘",        # Zugzwang Black
+        32: "⟳",        # Development advantage
+        36: "→",        # Initiative
+        40: "↑",        # Attack
+        44: "⌗",        # Compensation
+        132: "⇆",       # Counterplay
+        138: "⊕",       # Time pressure
+        140: "△",       # With the idea
+        142: "⌓",       # Better is
+        145: "RR",      # Editorial comment
+        146: "N",       # Novelty
+    }
+
+    _EFFECT_LABELS: dict[str, str] = {
+        "Brilliant":    "!! Brilliant",
+        "GreatFind":    "! Great Find",
+        "BestMove":     "✓ Best Move",
+        "Excellent":    "✓ Excellent",
+        "Good":         "Good",
+        "Book":         "📖 Book",
+        "Inaccuracy":   "?! Inaccuracy",
+        "Mistake":      "? Mistake",
+        "Blunder":      "?? Blunder",
+        "Miss":         "✗ Miss",
+        "MissedWin":    "✗ Missed Win",
+    }
+
+    @staticmethod
+    def _clean_comment(raw: str) -> tuple[str, str]:
+        """
+        Parse a raw PGN comment string (the text between { }) and return:
+          (clean_text, annotation_label)
+
+        What gets stripped / parsed:
+          • [%clk H:MM:SS.s]          → extracted as clock string
+          • [%timestamp N]            → discarded (server-internal)
+          • [%c_effect sq;...;type;X;...]  → type label extracted
+          • [%eval N.NN]              → extracted as eval string
+          • [%arrow ...]              → discarded
+          • [%cal ...]                → discarded (colored squares)
+          • Any other [%xxx ...]      → discarded
+
+        The bracket commands can span multiple lines (chess.com wraps them),
+        so the regex uses DOTALL.
+
+        Returns
+        -------
+        clean_text : str
+            The human-readable comment prose, with surrounding whitespace
+            and stray punctuation normalised.
+        annotation_label : str
+            A short summary string combining annotation type + clock if found,
+            e.g.  "!! Brilliant  ·  ⏱ 2:06"   or  "" if nothing found.
+        """
+        if not raw:
+            return "", ""
+
+        # ── 1. Extract [%clk H:MM:SS.s] ─────────────────────────────────
+        clk_match = re.search(r'\[%clk\s+([^\]]+)\]', raw, re.DOTALL)
+        clock_str = ""
+        if clk_match:
+            clk_val = clk_match.group(1).strip()
+            if '.' in clk_val:
+                clk_val = clk_val.split('.')[0]
+            parts = clk_val.split(':')
+            if len(parts) == 3:
+                try:
+                    h = int(parts[0])
+                    m = int(parts[1])
+                    s = parts[2]
+                    if h == 0:
+                        clock_str = f"{m}:{s}"
+                    else:
+                        clock_str = f"{h}:{m:02d}:{s}"
+                except ValueError:
+                    clock_str = clk_val
+            elif len(parts) == 2:
+                try:
+                    m = int(parts[0])
+                    s = parts[1]
+                    clock_str = f"{m}:{s}"
+                except ValueError:
+                    clock_str = clk_val
+            else:
+                clock_str = clk_val
+
+        # ── 2. Extract [%c_effect sq;...;type;X;...] ────────────────────
+        c_effect_match = re.search(r'\[%c_effect\s+[^\]]*?type;([^;\]]+)', raw, re.DOTALL)
+        effect_label = ""
+        if c_effect_match:
+            effect_type = c_effect_match.group(1).strip()
+            effect_label = PGNViewerApp._EFFECT_LABELS.get(effect_type, effect_type)
+
+        # ── 3. Extract [%eval N.NN] ─────────────────────────────────────
+        eval_match = re.search(r'\[%eval\s+([^\]]+)\]', raw, re.DOTALL)
+        eval_str = ""
+        if eval_match:
+            eval_raw = eval_match.group(1).strip()
+            if eval_raw.startswith('#'):
+                eval_str = eval_raw
+            else:
+                try:
+                    val = float(eval_raw)
+                    if val > 0:
+                        eval_str = f"+{eval_raw}" if not eval_raw.startswith('+') else eval_raw
+                    else:
+                        eval_str = eval_raw
+                except ValueError:
+                    eval_str = eval_raw
+
+        # ── 4. Strip all [%xxx ...] metadata commands from the raw text ──
+        clean_text = re.sub(r'\[%[a-zA-Z0-9_]+\s+.*?\]', '', raw, flags=re.DOTALL)
+
+        # ── 5. Normalise spacing, linebreaks, and punctuation ───────────
+        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+        clean_text = re.sub(r'\s+([.,?!;:])', r'\1', clean_text)
+        clean_text = re.sub(r'^[,\s;]+', '', clean_text)
+        clean_text = re.sub(r'[,\s;]+$', '', clean_text)
+
+        # ── 6. Incorporate evaluation info into clean_text if present ────
+        if eval_str:
+            if clean_text:
+                clean_text = f"[{eval_str}] {clean_text}"
+            else:
+                clean_text = f"[{eval_str}]"
+
+        # ── 7. Build the final annotation label ─────────────────────────
+        label_parts = []
+        if effect_label:
+            label_parts.append(effect_label)
+        if clock_str:
+            label_parts.append(f"⏱ {clock_str}")
+
+        annotation_label = "  ·  ".join(label_parts)
+
+        return clean_text, annotation_label
+
     def __init__(self):
         super().__init__()
 
@@ -1199,6 +1354,11 @@ class PGNViewerApp(ctk.CTk):
         curr_board = parent_node.board()
         move_num = curr_board.fullmove_number
         san = self.current_node.san()
+
+        # Suffix the SAN with NAG symbols if any
+        nags = self.current_node.nags
+        nag_suffixes = "".join(self.NAG_SYMBOLS.get(nag, "") for nag in nags if nag in self.NAG_SYMBOLS)
+
         turn = "White" if curr_board.turn == chess.WHITE else "Black"
         comment = self.current_node.comment.strip()
 
@@ -1206,11 +1366,16 @@ class PGNViewerApp(ctk.CTk):
         next_turn = "Black" if turn == "White" else "White"
         next_icon = "⚫" if next_turn == "Black" else "⚪"
 
-        outcome_text = f"♟️ Move {move_num}: {san} ({turn})\n"
+        outcome_text = f"♟️ Move {move_num}: {san}{nag_suffixes} ({turn})\n"
         outcome_text += f"{next_icon} Next: {next_turn} to move\n\n"
 
-        if comment:
-            outcome_text += f"💬 Comment:\n\"{comment}\""
+        clean_text, annotation_label = self._clean_comment(comment)
+
+        if annotation_label:
+            outcome_text += f"✨ {annotation_label}\n\n"
+
+        if clean_text:
+            outcome_text += f"💬 Comment:\n\"{clean_text}\""
             self.comment_detail_label.configure(text=outcome_text, text_color="#e8d5a3")
         else:
             outcome_text += "💬 Comment:\n(No comment on this move)"
